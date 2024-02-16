@@ -3,18 +3,18 @@ from typing import Optional
 import torch
 from torch_runstats.scatter import scatter
 from ..embedding._graph_mixin import GraphModuleMixin
-from ._linear import Linear
+# from ._linear import Linear
 from nequip.data import AtomicDataDict
 
-from e3nn.o3 import Irreps
+from e3nn.o3 import Linear
 
 class AtomwiseLinear(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
-        field: str = "node_features",
-        out_field: str = "atomic_energy",
+        field: str="node_features",
+        out_field: Optional[str]=None,
         irreps_in=None,
-        irreps_out=Irreps("1x0e"),
+        irreps_out=None,
     ):
         super().__init__()
         self.field = field
@@ -32,7 +32,7 @@ class AtomwiseLinear(GraphModuleMixin, torch.nn.Module):
             irreps_in=self.irreps_in[field], irreps_out=self.irreps_out[out_field],
         )
         
-    def forward(self, data:AtomicDataDict.Type) -> AtomicDataDict.Type:
+    def forward(self, data: dict[str, torch.Tensor]) ->  dict[str, torch.Tensor]:
         data[self.out_field] = self.linear(data[self.field])
         return data
     
@@ -42,8 +42,8 @@ class AtomwiseReduce(GraphModuleMixin, torch.nn.Module):
     
     def __init__(
         self, 
-        field: str = "atomic_energy",
-        out_field: str = "total_energy",
+        field: str="atomic_energy",
+        out_field: str="total_energy",
         reduce="sum",
         irreps_in=None,
     ):
@@ -59,7 +59,7 @@ class AtomwiseReduce(GraphModuleMixin, torch.nn.Module):
             else {},
         )
         
-    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+    def forward(self, data:  dict[str, torch.Tensor]) ->  dict[str, torch.Tensor]:
         data = AtomicDataDict.with_batch(data)
         data[self.out_field] = scatter(
             data[self.field], data[AtomicDataDict.BATCH_KEY], dim=0, reduce=self.reduce

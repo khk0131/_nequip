@@ -167,7 +167,7 @@ class Evaluator:
         
         
     def eval_dataset(self, dataloaders):
-        """Allegroモデルを評価する
+        """Nequipモデルを評価する
         """
         
         # loss_force_result['dataset_name'][step_num]

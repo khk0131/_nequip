@@ -2,7 +2,6 @@ from ..embedding._graph_mixin import GraphModuleMixin
 from ..embedding._edge import RadialBasisEdgeEncoding
 from ..embedding._edge import SphericalHarmonicsEdgeAttrs
 from ..embedding._one_hot import OneHotAtomEncoding
-from nequip.data import AtomicDataDict
 
 from ._convnetlayer import ConvNet
 from ._atomwise import AtomwiseLinear
@@ -119,7 +118,7 @@ class NequipBatch(GraphModuleMixin, torch.nn.Module):
         pos.requires_grad_(True)
         edge_vectors = pos[edge_index[1]] - pos[edge_index[0]] + edge_cell_shift
         
-        data: AtomicDataDict.Type
+        data: Dict[str, torch.Tensor]
         data['pos'] = pos
         data['egde_index'] = edge_index
         data["edge_cell_shift"] = edge_cell_shift

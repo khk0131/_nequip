@@ -1,52 +1,39 @@
-from typing import Optional, Dict, Callable
+from typing import Dict
 
 import torch
 from torch_runstats.scatter import scatter
 
 from e3nn import o3
-from e3nn.util.jit import compile_mode
 from e3nn.nn import FullyConnectedNet
 from e3nn.o3 import TensorProduct, FullyConnectedTensorProduct
 from _nequip.embedding._graph_mixin import GraphModuleMixin
 
-from nequip.nn.nonlinearities import ShiftedSoftPlus
+from ._non_linear import ShiftedSoftPlus
 
-from nequip.data import AtomicDataDict
 from ._linear import Linear
 
-
-# @compile_mode('script')
 class InteractionBlock(GraphModuleMixin, torch.nn.Module):
-    avg_num_neighbors: Optional[float]
-    use_sc: bool
-    
     def __init__(
         self, 
         irreps_in,
         irreps_out,
         invariant_layers=1,
         invariant_neurons=8,
-        avg_num_neighbors=None,
-        use_sc=True,
-        nonlinearity_scalars: Dict[int, Callable] = {"e": "ssp"},
+        activation_function: str="silu",
     ) -> None:
         super().__init__()
         
         self._init_irreps(
             irreps_in=irreps_in,
-            irreps_out={AtomicDataDict.NODE_FEATURES_KEY: irreps_out}
+            irreps_out={"node_features": irreps_out}
         )
         """
-        あらかじめembeddingしておく必要がある
+            あらかじめembeddingしておく必要がある
+            FullyConnectedNetで活性化関数をsiluかsspで選べる
         """
-        
-        self.avg_num_neighbors = avg_num_neighbors
-        self.use_sc = use_sc
-        
-        feature_irreps_in = self.irreps_in[AtomicDataDict.NODE_FEATURES_KEY]
-        feature_irreps_out = self.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]
-
-        irreps_edge_attr = self.irreps_in[AtomicDataDict.EDGE_ATTRS_KEY]
+        feature_irreps_in = self.irreps_in["node_features"]
+        feature_irreps_out = self.irreps_out["node_features"]
+        irreps_edge_attr = self.irreps_in["edge_attrs"]
         
         self.linear_1 = Linear(
             irreps_in=feature_irreps_in,
@@ -85,13 +72,13 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
 
         # init_irreps already confirmed that the edge embeddding is all invariant scalars
         self.fc = FullyConnectedNet(
-            [self.irreps_in[AtomicDataDict.EDGE_EMBEDDING_KEY].num_irreps]
+            [self.irreps_in["edge_embedding"].num_irreps]
             + invariant_layers * [invariant_neurons]
             + [tp.weight_numel],
             {
                 "ssp": ShiftedSoftPlus,
                 "silu": torch.nn.functional.silu,
-            }[nonlinearity_scalars["e"]],
+            }[activation_function],
         )
 
         self.tp = tp
@@ -106,16 +93,14 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
             internal_weights=True,
             shared_weights=True,
         )
+        
+        self.sc = FullyConnectedTensorProduct(
+            feature_irreps_in,
+            self.irreps_in["node_attrs"],
+            feature_irreps_out,
+        )
 
-        self.sc = None
-        if self.use_sc:
-            self.sc = FullyConnectedTensorProduct(
-                feature_irreps_in,
-                self.irreps_in[AtomicDataDict.NODE_ATTRS_KEY],
-                feature_irreps_out,
-            )
-
-    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+    def forward(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
         Evaluate interaction Block with ResNet (self-connection).
 
@@ -125,34 +110,28 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
         :param edge_dst: edgeを結ぶ隣接原子
         :param edge_attr: edge_vectorを球面調和関数に入れて投影したもの
         :param edge_embedded: rotation equivariantを達成するために、edge_lengthをbessel関数に入れてGNNにおける距離の情報を保つ
-        
-
         :return:
         """
-        weight = self.fc(data[AtomicDataDict.EDGE_EMBEDDING_KEY])
+        weight = self.fc(data["edge_embedding"])
 
-        x = data[AtomicDataDict.NODE_FEATURES_KEY]
-        edge_src = data[AtomicDataDict.EDGE_INDEX_KEY][1]
-        edge_dst = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+        x = data["node_features"]
+        edge_src = data["edge_index"][1]
+        edge_dst = data["edge_index"][0]
 
         if self.sc is not None:
-            sc = self.sc(x, data[AtomicDataDict.NODE_ATTRS_KEY])
+            sc = self.sc(x, data["node_attrs"])
 
         x = self.linear_1(x) # self-interaction1 ?
         
         edge_features = self.tp(
-            x[edge_src], data[AtomicDataDict.EDGE_ATTRS_KEY], weight
+            x[edge_src], data["edge_attrs"], weight
         )
         x = scatter(edge_features, edge_dst, dim=0, dim_size=len(x))
-
-        avg_num_neigh: Optional[float] = self.avg_num_neighbors
-        if avg_num_neigh is not None:
-            x = x.div(avg_num_neigh**0.5)
 
         x = self.linear_2(x) # self-interaction2 ?
 
         if self.sc is not None:
             x = x + sc # concatnation ?
         
-        data[AtomicDataDict.NODE_FEATURES_KEY] = x
+        data["node_features"] = x
         return data
