@@ -100,7 +100,7 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
         self.resnet = resnet
         self.irreps_in = irreps_in
         self.irreps_out = irreps_out
-          
+        
         self.one_hot_encoding = OneHotAtomEncoding(
             num_types = self.num_types,
             irreps_in = self.irreps_in,
