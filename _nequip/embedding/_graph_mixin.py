@@ -1,6 +1,5 @@
 from typing import Dict, Any, Sequence
 from e3nn import o3
-from nequip.data import AtomicDataDict
 
 _SPECIAL_IRREPS = [None]
 
@@ -17,29 +16,38 @@ class GraphModuleMixin:
         irreps_out: Dict[str, Any] = {},
     ):
         """
-        pos: o3.Irreps(1x1o)である必要性
-        edge_index: [2, num_edge]
+            pos, edge_indexがまず含まれている必要性があります
+            required_irrepsでirreps_inに含まれるべきirrepsを示します
+            
+            pos: o3.Irreps(1x1o)である必要性
+            edge_index: [2, num_edge]
         """
         irreps_in = {} if irreps_in is None else irreps_in
         irreps_in = _fix_irreps_dict(irreps_in)
         
-        if AtomicDataDict.POSITIONS_KEY in irreps_in:
-            if irreps_in[AtomicDataDict.POSITIONS_KEY] != o3.Irreps("1x1o"):
+        if "pos" in irreps_in:
+            if irreps_in["pos"] != o3.Irreps("1x1o"):
                 raise ValueError(
-                    f"Positions must have irreps 1o, got instead"
+                    "Positions must have irreps 1o, got instead"
                 )
-        irreps_in[AtomicDataDict.POSITIONS_KEY] = o3.Irreps("1o")
+        irreps_in["pos"] = o3.Irreps("1o")
         
-        if AtomicDataDict.EDGE_INDEX_KEY in irreps_in:
-            if irreps_in[AtomicDataDict.EDGE_INDEX_KEY] is not None:
+        if "edge_index" in irreps_in:
+            if irreps_in["edge_index"] is not None:
                 raise ValueError(
                     "Edge indexes must have irreps None"
                 )
-        irreps_in[AtomicDataDict.EDGE_INDEX_KEY] = None
+        irreps_in["edge_index"] = None
         
-        my_irreps_in = AtomicDataDict._fix_irreps_dict(my_irreps_in)
+        for k in required_irreps_in:
+            if k not in irreps_in:
+                raise ValueError(
+                    f"{k} should be in irreps_in"
+                )
         
-        irreps_out = AtomicDataDict._fix_irreps_dict(irreps_out)
+        my_irreps_in = _fix_irreps_dict(my_irreps_in)
+        
+        irreps_out = _fix_irreps_dict(irreps_out)
         
         self.irreps_in = irreps_in
         new_out = irreps_in.copy()

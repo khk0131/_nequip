@@ -2,6 +2,7 @@ import torch
 from typing import Dict, Any
 import pathlib 
 import os
+import time
 
 from .dataset import NequipDataset
 from ..nn.nequip import Nequip
@@ -22,6 +23,15 @@ class Trainer:
                 r_max=config['cut_off'],
                 lmax=config['lmax'],
                 num_layers=config['num_layers'],
+                activation_function=config["activation_function"],
+                invariant_layers=config['invariant_layers'],
+                invariant_neurons=config['invariant_neurons'],
+                bessel_num_basis=config["bessel_num_basis"],
+                bessel_basis_trainable=config["bessel_basis_trainable"],
+                polynomial_p=config["polynomial_p"],
+                edge_sh_normalization=config["edge_sh_normalization"],
+                edge_sh_normalize=config["edge_sh_normalize"],
+                resnet=config["resnet"],
             )
             self.model.to(self.device)
             self.model.train()
@@ -75,6 +85,7 @@ class Trainer:
             self.scheduler.step()
             
         self.loss_pot_ratio = config['loss_pot_ratio_initial']
+        self.loss_force_ratio = config['loss_force_ratio_initial']
         
         os.makedirs(config['state_dict_dir'], exist_ok=True)
         os.makedirs(config['save_frozen_model_dir'], exist_ok=True)
@@ -150,6 +161,9 @@ class Trainer:
         assert 'cut_off' in config
         assert 'lmax' in config
         assert 'num_layers' in config
+        assert 'invariant_layers' in config
+        assert 'invariant_neurons' in config
+        assert 'activation_function' in config
         
         self.config = config
         
@@ -157,45 +171,49 @@ class Trainer:
     def train(self):
         """Nequipモデルを訓練するクラス
         """
-        print("epoch step_num    pred_pot_e    true_pot_e    loss_pot    loss_force      lr          loss_pot_ratio    data_path", flush=True)
+        print("epoch step_num    pred_pot_e    true_pot_e    loss_pot    loss_force      lr          loss_pot_ratio    time_step    data_path", flush=True)
         for epoch in range(self.config['epoch']):
             for initial_frame_idx in range(self.config['frame_skip_num']):
                 for frames in self.train_dataloader:
                     for frame_idx in range(initial_frame_idx, len(frames), self.config['frame_skip_num']):
+                        start_time = time.time()
                         if self.step_num % self.config['loss_pot_ratio_step_size'] == 0 and self.step_num != 0:
                             self.loss_pot_ratio *= self.config['loss_pot_ratio_gamma']
-                        data = frames[frame_idx]
-                        inputs: AtomicDataDict.Type = {
+                        if self.step_num % self.config['loss_force_ratio_step_size'] == 0 and self.step_num != 0:
+                            self.loss_force_ratio *= self.config['loss_force_ratio_gamma']
+                        try:
+                            if self.step_num % self.config['save_model_step_size'] == 0:
+                                torch.save(
+                                    self.model.state_dict(),
+                                    self.config['state_dict_dir'] / f'nequip_{self.step_num}.pth'
+                                )
+                                script_model = torch.jit.script(self.model)
+                                frozen_model = torch.jit.optimize_for_inference(script_model.eval())
+                                frozen_model.save(
+                                    self.config['save_frozen_model_dir'] / f'nequip_frozen_{self.step_num}.pth'
+                                )
+                            data = frames[frame_idx]
+                            inputs: AtomicDataDict.Type = {
                             'atom_types': data['atom_types'],
                             'pos': data['pos'],
                             'edge_index': data['edge_index'],
                             'cut_off': data['cut_off'],
                             'cell': data['cell'],
-                        }
-                        if self.step_num % self.config['save_model_step_size'] == 0:
-                            torch.save(
-                                self.model.state_dict(),
-                                self.config['state_dict_dir'] / f'nequip_{self.step_num}.pth'
-                            )
-                            script_model = torch.jit.script(self.model)
-                            frozen_model = torch.jit.optimize_for_inference(script_model.eval())
-                            frozen_model.save(
-                                self.config['save_frozen_model_dir'] / f'nequip_frozen_{self.step_num}.pth'
-                            )
-                        try:
+                            }
                             self.step_num += 1
                             self.optimizer.zero_grad()
                             assert abs(self.config['cut_off'] - data['cut_off'].item()) < 1e-6, 'datasetのcut_offとtrain用のconfigのcut_offが違います'
                             total_energy, force = self.model(inputs)
                             loss_pot = abs(total_energy - data['potential_energy'])
                             loss_forces = torch.sum((force - data['force']).pow(2)).sqrt()
-                            loss = (loss_pot / (data['pos'].numel() / 3.0)).pow(2) * self.loss_pot_ratio + (loss_forces.pow(2) / data['pos'].numel())
+                            loss = (loss_pot / (data['pos'].numel() / 3.0)).pow(2) * self.loss_pot_ratio + (loss_forces.pow(2) / data['pos'].numel()) * self.loss_force_ratio
                             loss.backward()
                             self.optimizer.step()
                             self.scheduler.step()
                             loss_forces_per_atom = loss_forces.item() / (data['pos'].numel()**(1/2))
                             data_path = pathlib.Path(data['path']).stem
-                            print(f"{epoch:>3} {self.step_num:>10} {total_energy.item():>12.4f} {data['potential_energy'].item():>12.4f} {loss_pot.item():>12.4f}    {loss_forces_per_atom:>12.5f} {self.scheduler.get_last_lr()[0]:>12.2e} {self.loss_pot_ratio:>12.2e}        {data_path}", flush=True)
+                            end_time = time.time()
+                            print(f"{epoch:>3} {self.step_num:>10} {total_energy.item():>12.4f} {data['potential_energy'].item():>12.4f} {loss_pot.item():>12.4f}    {loss_forces_per_atom:>12.5f} {self.scheduler.get_last_lr()[0]:>12.2e} {self.loss_pot_ratio:>12.2e}    {(end_time - start_time):>12.4f}      {data_path}", flush=True)
                         except Exception as e:
                             print(e)
                             continue

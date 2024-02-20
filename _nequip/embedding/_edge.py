@@ -1,4 +1,4 @@
-from typing import Union, Dict, Optional
+from typing import Union, Dict
 
 import torch
 import math
@@ -6,15 +6,12 @@ import math
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
-from nequip.data import AtomicDataDict
 from ._graph_mixin import GraphModuleMixin
 
-Type = Dict[str, torch.Tensor]
-
-def with_edge_vectors(data: Type, with_lengths: bool = True) -> Type:
+def with_edge_lengths(data: Dict[str, torch.Tensor], with_lengths: bool = True) -> Dict[str, torch.Tensor]:
     """
-    edge_vectors, edge_lengthsを求める
-    edge_cell_shiftを考慮したedge_vector
+        edge_vectors, edge_lengthsを求める
+        edge_cell_shiftを考慮したedge_vector
     """
     if with_lengths and "edge_lengths" not in data:
         data["edge_lengths"] = torch.linalg.norm(
@@ -24,6 +21,16 @@ def with_edge_vectors(data: Type, with_lengths: bool = True) -> Type:
 
 @torch.jit.script
 def _poly_cutoff(x: torch.Tensor, factor: float, p: float = 6.0) -> torch.Tensor:
+    """ 距離に依存したRBF(radial basis function)がcutoffで2回微分可能でないので包絡関数を定義して2回微分を可能にする
+        Parameters
+        ----------
+            x: torch.Tensor, shape: [num_edges]
+                各エッジの長さの情報
+            factor: float
+                cutoffで正規化する
+            p: float
+                RBFに対して用いる包絡関数で使用するパラメータ
+    """
     x = x * factor
     
     out = 1.0
@@ -34,10 +41,13 @@ def _poly_cutoff(x: torch.Tensor, factor: float, p: float = 6.0) -> torch.Tensor
     return out * (x < 1.0)
 
 class PolynominalCutoff(torch.nn.Module):
+    """距離に依存したRBFを定義するために必要な包絡関数を定義
+    """
     _factor: float
     p: float
     
     def __init__(self, r_max: float, p: float = 6):
+        
         super().__init__()
         assert p >= 2.0
         self.p = p
@@ -48,6 +58,9 @@ class PolynominalCutoff(torch.nn.Module):
 
 @compile_mode("script")
 class SphericalHarmonicsEdgeAttrs(GraphModuleMixin, torch.nn.Module):
+    """ edge vectorsを球面調和関数に投影することによってedge attrsを求める
+        この投影により、SO(3): 回転に対して同変性を保ちながらMLPなどの処理が可能になる
+    """
     out_field: str
     
     def __init__(
@@ -56,8 +69,19 @@ class SphericalHarmonicsEdgeAttrs(GraphModuleMixin, torch.nn.Module):
         edge_sh_normalization: str = "component",
         edge_sh_normalize: bool = True,
         irreps_in = None,
-        out_field: str = AtomicDataDict.EDGE_ATTRS_KEY,
+        out_field: str = "edge_attrs",
         ):
+        """
+        Parameters
+        ----------
+            irreps_edge_sh: int or str or o3.Irreps
+                球面調和関数の最大のl(角振動数), 
+                data[edge_attrs]のshapeは[num_edges, 0+3+5+...+2*lmax+1]となる
+            edge_sh_normalization: str
+                component: |Y(x)|.pow(2) = 2*l + 1 -> edge_attrs.shap[-1] = 2*l + 1にする
+            edge_sh_normalize: bool
+                球面調和関数にedge_vectorsを投影する前に正規化を行うかどうか
+        """
         super().__init__()
         self.out_field = out_field
         
@@ -73,9 +97,18 @@ class SphericalHarmonicsEdgeAttrs(GraphModuleMixin, torch.nn.Module):
             self.irreps_edge_sh, edge_sh_normalize, edge_sh_normalization
         )
     
-    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        data = with_edge_vectors(data, with_lengths=True)
-        edge_vec = data[AtomicDataDict.EDGE_VECTORS_KEY]
+    def forward(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """球面調和関数により、edge_vectorsを投影する
+        球面調和関数の計算結果はedge_attrsに入る
+        Parameters
+        ----------
+            data: Dict[str, torch.Tensor]
+            edge_vectorsをdataの中に含まれる必要性がある.
+            edge_vectors : torch.Tensor
+                原子iから原子jへの方向ベクトル, shape: [num_edges, 3]
+        """
+        data = with_edge_lengths(data, with_lengths=True)
+        edge_vec = data["edge_vectors"]
         edge_sh = self.sh(edge_vec)
         data[self.out_field] = edge_sh
         return data
@@ -119,25 +152,33 @@ class RadialBasisEdgeEncoding(GraphModuleMixin, torch.nn.Module):
         basis=BesselBasis,
         cutoff = PolynominalCutoff,
         r_max: float = 4.0,
-        out_field: str = AtomicDataDict.EDGE_EMBEDDING_KEY,
+        bessel_num_basis: int = 8,
+        bessel_basis_trainable: bool = True,
+        polynomial_p: float = 6.0,
+        out_field: str = "edge_embedding",
         irreps_in = None,
     ):
         super().__init__()
-        self.basis = basis(r_max=r_max)
-        self.cutoff = cutoff(r_max=r_max)
+        self.basis = basis(r_max=r_max, num_basis=bessel_num_basis, trainable=bessel_basis_trainable)
+        self.cutoff = cutoff(r_max=r_max, p=polynomial_p)
         self.out_field = out_field
         self._init_irreps(
             irreps_in=irreps_in,
             irreps_out={self.out_field: o3.Irreps([(self.basis.num_basis, (0, 1))])},
         )
         
-    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        data = with_edge_vectors(data, with_lengths=True)
-        edge_lengths = data[AtomicDataDict.EDGE_LENGTH_KEY]
-
+    def forward(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """edgeの情報(edge_lengths)をベッセル関数に入れた結果edge_embeddingに入れる
+        Parameters
+        ----------
+        data: Dict[str, torch.Tensor]
+            edge_lengths : torch.Tensor, shape:[num_edges]
+                中心の原子からneighborの原子へのベクトルの大きさ
+        """
+        data = with_edge_lengths(data, with_lengths=True)
+        edge_lengths = data["edge_lengths"]
         edge_lengths_embedded = (
             self.basis(edge_lengths) * self.cutoff(edge_lengths).unsqueeze(-1)
         )
-
         data[self.out_field] = edge_lengths_embedded
         return data
