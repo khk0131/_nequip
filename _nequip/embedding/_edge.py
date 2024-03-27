@@ -8,16 +8,15 @@ from e3nn.util.jit import compile_mode
 
 from ._graph_mixin import GraphModuleMixin
 
-def with_edge_lengths(data: Dict[str, torch.Tensor], with_lengths: bool = True) -> Dict[str, torch.Tensor]:
+def with_edge_lengths(edge_vectors: torch.Tensor) -> torch.Tensor:
     """
         edge_vectors, edge_lengthsを求める
         edge_cell_shiftを考慮したedge_vector
     """
-    if with_lengths and "edge_lengths" not in data:
-        data["edge_lengths"] = torch.linalg.norm(
-                data["edge_vectors"], dim=-1
-        )
-    return data
+    edge_lengths = torch.linalg.norm(
+        edge_vectors, dim=-1
+    )
+    return edge_lengths
 
 @torch.jit.script
 def _poly_cutoff(x: torch.Tensor, factor: float, p: float = 6.0) -> torch.Tensor:
@@ -97,7 +96,7 @@ class SphericalHarmonicsEdgeAttrs(GraphModuleMixin, torch.nn.Module):
             self.irreps_edge_sh, edge_sh_normalize, edge_sh_normalization
         )
     
-    def forward(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, edge_vectors: torch.Tensor) -> torch.Tensor:
         """球面調和関数により、edge_vectorsを投影する
         球面調和関数の計算結果はedge_attrsに入る
         Parameters
@@ -107,11 +106,8 @@ class SphericalHarmonicsEdgeAttrs(GraphModuleMixin, torch.nn.Module):
             edge_vectors : torch.Tensor
                 原子iから原子jへの方向ベクトル, shape: [num_edges, 3]
         """
-        data = with_edge_lengths(data, with_lengths=True)
-        edge_vec = data["edge_vectors"]
-        edge_sh = self.sh(edge_vec)
-        data[self.out_field] = edge_sh
-        return data
+        edge_attrs = self.sh(edge_vectors)
+        return edge_attrs
     
 class BesselBasis(torch.nn.Module):
     r_max: float
@@ -167,7 +163,7 @@ class RadialBasisEdgeEncoding(GraphModuleMixin, torch.nn.Module):
             irreps_out={self.out_field: o3.Irreps([(self.basis.num_basis, (0, 1))])},
         )
         
-    def forward(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, edge_vectors) -> torch.Tensor:
         """edgeの情報(edge_lengths)をベッセル関数に入れた結果edge_embeddingに入れる
         Parameters
         ----------
@@ -175,10 +171,8 @@ class RadialBasisEdgeEncoding(GraphModuleMixin, torch.nn.Module):
             edge_lengths : torch.Tensor, shape:[num_edges]
                 中心の原子からneighborの原子へのベクトルの大きさ
         """
-        data = with_edge_lengths(data, with_lengths=True)
-        edge_lengths = data["edge_lengths"]
-        edge_lengths_embedded = (
+        edge_lengths = with_edge_lengths(edge_vectors)
+        edge_embedding = (
             self.basis(edge_lengths) * self.cutoff(edge_lengths).unsqueeze(-1)
         )
-        data[self.out_field] = edge_lengths_embedded
-        return data
+        return edge_embedding

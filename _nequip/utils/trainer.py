@@ -6,7 +6,6 @@ import time
 
 from .dataset import NequipDataset
 from ..nn.nequip import Nequip
-from nequip.data import AtomicDataDict
 
 class Trainer:
     def __init__(
@@ -22,7 +21,9 @@ class Trainer:
                 num_atom_types=config['num_atom_types'],
                 r_max=config['cut_off'],
                 lmax=config['lmax'],
+                parity=config['parity'],
                 num_layers=config['num_layers'],
+                num_features=config['num_features'],
                 activation_function=config["activation_function"],
                 invariant_layers=config['invariant_layers'],
                 invariant_neurons=config['invariant_neurons'],
@@ -49,7 +50,6 @@ class Trainer:
             dataset_paths=self.config['train_dataset_paths'],
             device=self.device,
         )
-        
         self.train_dataloader = torch.utils.data.DataLoader(
             self.train_dataset,
             shuffle=self.config['shuffle_dataset'],
@@ -160,7 +160,9 @@ class Trainer:
         assert 'num_atom_types' in config
         assert 'cut_off' in config
         assert 'lmax' in config
+        assert 'parity' in config
         assert 'num_layers' in config
+        assert 'num_features' in config
         assert 'invariant_layers' in config
         assert 'invariant_neurons' in config
         assert 'activation_function' in config
@@ -193,27 +195,38 @@ class Trainer:
                                     self.config['save_frozen_model_dir'] / f'nequip_frozen_{self.step_num}.pth'
                                 )
                             data = frames[frame_idx]
-                            inputs: AtomicDataDict.Type = {
-                            'atom_types': data['atom_types'],
-                            'pos': data['pos'],
-                            'edge_index': data['edge_index'],
-                            'cut_off': data['cut_off'],
-                            'cell': data['cell'],
-                            }
+                            backward_ok = True
+                            # data['pos'] += 0.5 # 0.0001
                             self.step_num += 1
                             self.optimizer.zero_grad()
                             assert abs(self.config['cut_off'] - data['cut_off'].item()) < 1e-6, 'datasetのcut_offとtrain用のconfigのcut_offが違います'
-                            total_energy, force = self.model(inputs)
-                            loss_pot = abs(total_energy - data['potential_energy'])
-                            loss_forces = torch.sum((force - data['force']).pow(2)).sqrt()
+                            # outputs['total_energy'], force = self.model(inputs)
+                            outputs = self.model(
+                                data['pos'],
+                                data['atom_types'],
+                                data['edge_index'],
+                                data['cut_off'],
+                                data['cell'],
+                            )
+                            loss_pot = abs(outputs['total_energy'] - data['potential_energy'])
+                            loss_forces = torch.sum((outputs['atomic_force'] - data['force']).pow(2)).sqrt()
+                            if loss_forces > 1000:
+                                print(outputs["atomic_force"])
+                                print(data['force'])
+                                print(data['pos'])
+                                backward_ok = False
                             loss = (loss_pot / (data['pos'].numel() / 3.0)).pow(2) * self.loss_pot_ratio + (loss_forces.pow(2) / data['pos'].numel()) * self.loss_force_ratio
-                            loss.backward()
-                            self.optimizer.step()
-                            self.scheduler.step()
+                            if backward_ok:
+                                loss.backward()
+                                self.optimizer.step()
+                                self.scheduler.step()
+                            # loss.backward()
+                            # self.optimizer.step()
+                            # self.scheduler.step()
                             loss_forces_per_atom = loss_forces.item() / (data['pos'].numel()**(1/2))
                             data_path = pathlib.Path(data['path']).stem
                             end_time = time.time()
-                            print(f"{epoch:>3} {self.step_num:>10} {total_energy.item():>12.4f} {data['potential_energy'].item():>12.4f} {loss_pot.item():>12.4f}    {loss_forces_per_atom:>12.5f} {self.scheduler.get_last_lr()[0]:>12.2e} {self.loss_pot_ratio:>12.2e}    {(end_time - start_time):>12.4f}      {data_path}", flush=True)
+                            print(f"{epoch:>3} {self.step_num:>10} {outputs['total_energy'].item():>12.4f} {data['potential_energy'].item():>12.4f} {loss_pot.item():>12.4f}    {loss_forces_per_atom:>12.5f} {self.scheduler.get_last_lr()[0]:>12.2e} {self.loss_pot_ratio:>12.2e}    {(end_time - start_time):>12.4f}      {data_path}", flush=True)
                         except Exception as e:
                             print(e)
                             continue

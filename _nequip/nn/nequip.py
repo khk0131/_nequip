@@ -29,6 +29,10 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
                 cutoffの大きさ
             lmax: int
                 球面調和関数でedge_vectorを投影する際のlの最大値
+            parity: int
+                parityは反転操作を示す
+                p = ±1 (+1: even parity, -1: odd parity)
+                p = 1では関数の反転はない, p=-1のとき反転を表す
             num_layers: int
                 convnet layerの数
             invariant_layers: int
@@ -63,6 +67,8 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
                 各処理前に持つirrepsを表す
             irreps_out: Dict[str, o3.Irreps]
                 各処理後に持つirrepsを表す
+            feature_irreps_hidden: Dict[str, o3.Irreps]
+                ConvNet内でのnode featuresを表すirreps
     """
     
     def __init__(
@@ -70,7 +76,9 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
         num_atom_types: int,
         r_max: float,
         lmax: int,
+        parity: int,
         num_layers: int,
+        num_features: int,
         invariant_layers: int,
         invariant_neurons: int,
         activation_function: str = "silu",
@@ -88,7 +96,9 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
         self.num_types = num_atom_types
         self.r_max=r_max
         self.lmax = lmax
+        self.parity = parity
         self.num_layers = num_layers
+        self.num_features = num_features
         self.invariant_layers = invariant_layers
         self.invariant_neurons = invariant_neurons
         self.activation_function = activation_function
@@ -100,6 +110,14 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
         self.resnet = resnet
         self.irreps_in = irreps_in
         self.irreps_out = irreps_out
+        self.feature_irreps_hidden = o3.Irreps(
+            [
+                (self.num_features, (l, p))
+                for p in ((1, -1) if self.parity == -1 else (1,))
+                for l in range(self.lmax + 1)
+            ]
+        )
+        self.conv_to_output_hidden_irreps = o3.Irreps([(max(1, num_features//2), (0, 1))])
         
         self.one_hot_encoding = OneHotAtomEncoding(
             num_types = self.num_types,
@@ -138,7 +156,7 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
 
         self.convnetlayer = ConvNet(
             irreps_in=self.irreps_out,
-            feature_irreps_hidden=self.irreps_out["edge_attrs"],
+            feature_irreps_hidden=self.feature_irreps_hidden,
             num_layers=self.num_layers,
             invariant_layers=self.invariant_layers,
             invariant_neurons=self.invariant_neurons,
@@ -147,20 +165,24 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
         )
         
         self.conv_to_output_hidden = AtomwiseLinear(
-            irreps_in={"node_features": o3.Irreps.spherical_harmonics(self.lmax)}
+            irreps_in=self.feature_irreps_hidden,
+            irreps_out=self.conv_to_output_hidden_irreps,
         )
         
         self.atomic_energy = AtomwiseLinear(
-            irreps_in={"node_features": o3.Irreps.spherical_harmonics(self.lmax)}, 
-            out_field="atomic_energy", 
-            irreps_out=o3.Irreps("1x0e")
+            irreps_in=self.conv_to_output_hidden_irreps,
+            irreps_out=o3.Irreps("1x0e"),
         )
         
-        self.total_energy = AtomwiseReduce(
-            irreps_in={"atomic_energy": o3.Irreps("1x0e")}, out_field="total_energy"
-        )
+        self.total_energy = AtomwiseReduce()
     
-    def forward(self, data: Dict[str, torch.Tensor]):
+    def forward(self,
+                pos: torch.Tensor,
+                atom_types: torch.Tensor,
+                edge_index: torch.Tensor,
+                cut_off: torch.Tensor,
+                cell: torch.Tensor,
+    ):
         """ポテンシャルエネルギーと力を予測する
         Parameters
         ----------
@@ -172,29 +194,19 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
             total_energy: torch.Tensor, shape: []
             atomic_force: torch.Tensor, shape: [num_atoms, 3]
         """
-        pos = data["pos"]
-        edge_index = data["edge_index"]
-        cut_off = data["cut_off"]
-        cell= data["cell"]
         pos.requires_grad_(True)
         edge_index = torch.cat((edge_index, edge_index[[1, 0]]), dim=1)
         edge_cell_shift = get_edge_cell_shift(pos, edge_index, cut_off, cell)
         edge_vectors = pos[edge_index[1]] - pos[edge_index[0]] + edge_cell_shift
-        
-        data["edge_index"] = edge_index
-        data["edge_cell_shift"] = edge_cell_shift
-        data["edge_vectors"] = edge_vectors
 
-        data = self.one_hot_encoding(data)
-        data = self.radial_encoding(data)
-        data = self.spherical_encoding(data) # ここまでがembedding
-        data = self.convnetlayer(data) # Message Passingでnode featuresをnum_layers分だけ更新
-        data = self.conv_to_output_hidden(data)
-        data = self.atomic_energy(data)
-        data = self.total_energy(data) # 全体のエネルギーを求めます
-        
-        total_energy = data["total_energy"]
-        pos = data["pos"]
+        node_attrs = self.one_hot_encoding(pos, atom_types)
+        node_features = node_attrs
+        edge_embedding = self.radial_encoding(edge_vectors)
+        edge_attrs = self.spherical_encoding(edge_vectors) # ここまでがembedding
+        node_features = self.convnetlayer(node_features, node_attrs, edge_index, edge_embedding, edge_attrs) # Message Passingでnode featuresをnum_layers分だけ更新
+        node_features = self.conv_to_output_hidden(node_features)
+        atomic_energy = self.atomic_energy(node_features)
+        total_energy = self.total_energy(atomic_energy) # 全体のエネルギーを求めます
         
         atomic_force = torch.autograd.grad(
             [
@@ -206,8 +218,13 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
             retain_graph=self.training,
             create_graph=self.training,
         )[0] # 各原子に働く力を求めます
-    
-        return total_energy, atomic_force
+
+        outputs = {
+            "total_energy": total_energy,
+            "atomic_force": atomic_force,
+        }
+        
+        return outputs
     
     def count_parameters(self):
         """Nequipモデルのパラメータ数をカウントする

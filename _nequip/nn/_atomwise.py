@@ -4,37 +4,36 @@ import torch
 from torch_runstats.scatter import scatter
 from ..embedding._graph_mixin import GraphModuleMixin
 # from ._linear import Linear
-from nequip.data import AtomicDataDict
 
 from e3nn.o3 import Linear
 
 class AtomwiseLinear(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
-        field: str="node_features",
-        out_field: Optional[str]=None,
         irreps_in=None,
         irreps_out=None,
     ):
         super().__init__()
-        self.field = field
-        out_field = out_field if out_field is not None else field
-        self.out_field = out_field
-        if irreps_out is None:
-            irreps_out = irreps_in[field]
-        
-        self._init_irreps(
-            irreps_in=irreps_in,
-            required_irreps_in=[field],
-            irreps_out={out_field: irreps_out},
-        )
+        # self.field = field
+        # out_field = out_field if out_field is not None else field
+        # self.out_field = out_field
+        # if irreps_out is None:
+        #     irreps_out = irreps_in[field]
+        self.irreps_in = irreps_in
+        self.irreps_out = irreps_out
+        # self._init_irreps(
+        #     irreps_in=irreps_in,
+        #     required_irreps_in=[field],
+        #     irreps_out={out_field: irreps_out},
+        # )
+        # print(self.irreps_in[self.field], self.irreps_out[self.out_field])
         self.linear = Linear(
-            irreps_in=self.irreps_in[field], irreps_out=self.irreps_out[out_field],
+            irreps_in=self.irreps_in, irreps_out=self.irreps_out,
         )
         
-    def forward(self, data: dict[str, torch.Tensor]) ->  dict[str, torch.Tensor]:
-        data[self.out_field] = self.linear(data[self.field])
-        return data
+    def forward(self, node_features: torch.Tensor) -> torch.Tensor:
+        node_features = self.linear(node_features)
+        return node_features
     
 
 class AtomwiseReduce(GraphModuleMixin, torch.nn.Module):
@@ -42,27 +41,14 @@ class AtomwiseReduce(GraphModuleMixin, torch.nn.Module):
     
     def __init__(
         self, 
-        field: str="atomic_energy",
-        out_field: str="total_energy",
         reduce="sum",
-        irreps_in=None,
     ):
         super().__init__()
         self.reduce = reduce
-        self.field = field
-        self.out_field = out_field
         
-        self._init_irreps(
-            irreps_in=irreps_in,
-            irreps_out={self.out_field: irreps_in[self.field]}
-            if self.field in irreps_in
-            else {},
+    def forward(self, atomic_energy:  torch.Tensor) -> torch.Tensor:
+        index = torch.zeros(len(atomic_energy), dtype=torch.long, device=atomic_energy.device)
+        total_energy = scatter(
+            atomic_energy, index, dim=0, reduce=self.reduce
         )
-        
-    def forward(self, data:  dict[str, torch.Tensor]) ->  dict[str, torch.Tensor]:
-        data = AtomicDataDict.with_batch(data)
-        data[self.out_field] = scatter(
-            data[self.field], data[AtomicDataDict.BATCH_KEY], dim=0, reduce=self.reduce
-        )
-        
-        return data
+        return total_energy
