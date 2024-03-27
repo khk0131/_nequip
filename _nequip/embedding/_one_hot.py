@@ -14,12 +14,10 @@ class OneHotAtomEncoding(GraphModuleMixin, torch.nn.Module):
     """原子のタイプのonehotを作るクラス
     """  
     num_types: int
-    set_features: bool
     
     def __init__(
         self,
         num_types: int,
-        set_features: bool = True,
         irreps_in=None,
     ):
         """
@@ -32,14 +30,12 @@ class OneHotAtomEncoding(GraphModuleMixin, torch.nn.Module):
         """
         super().__init__()
         self.num_types = num_types
-        self.set_features = set_features
         
         irreps_out = {"node_attrs": Irreps([(self.num_types, (0, 1))])}
-        if self.set_features: # node_featuresをnode_attrsとともに定める
-            irreps_out["node_features"] = irreps_out["node_attrs"]
+        irreps_out["node_features"] = irreps_out["node_attrs"]
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
         
-    def forward(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, pos: torch.Tensor, atom_types: torch.Tensor) -> torch.Tensor:
         """
         Parameters
         ----------
@@ -50,14 +46,15 @@ class OneHotAtomEncoding(GraphModuleMixin, torch.nn.Module):
             pos: torch.Tensor, shape:[num_atoms, 3]
                 原子の座標
         """
-        type_numbers = data["atom_types"].squeeze(-1)
-        one_hot = torch.nn.functional.one_hot(
+        type_numbers = atom_types.squeeze(-1)
+        node_attrs = torch.nn.functional.one_hot(
             type_numbers, num_classes=self.num_types
-        ).to(device=type_numbers.device, dtype=data["pos"].dtype)
-        data["node_attrs"] = one_hot
-        if self.set_features:
-            data["node_features"] = one_hot
-        return data
+        ).to(device=type_numbers.device, dtype=pos.dtype)
+        # data["node_attrs"] = one_hot
+        # if self.set_features:
+        #     data["node_features"] = one_hot
+        # node_features = node_attrs
+        return node_attrs
 
 
 

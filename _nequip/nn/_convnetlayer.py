@@ -3,21 +3,15 @@ import torch
 import logging
 
 from e3nn import o3
-from e3nn.nn import Gate, NormActivation
 from e3nn.util.jit import compile_mode
+from e3nn.nn import NormActivation
 
 from ._interaction_block import InteractionBlock
 from _nequip.embedding._graph_mixin import GraphModuleMixin
 from ._non_linear import ShiftedSoftPlus
-from nequip.utils.tp_utils import tp_path_exists
+from .exist_path import tp_path_exists
 
-act_function = {
-    "abs": torch.abs,
-    "tanh": torch.tanh,
-    "ssp": ShiftedSoftPlus,
-    "silu": torch.nn.functional.silu,
-}
-
+@compile_mode('script')
 class ConvNet(GraphModuleMixin, torch.nn.Module):
     """
 
@@ -37,21 +31,19 @@ class ConvNet(GraphModuleMixin, torch.nn.Module):
         activation_function: str = "silu",
         resnet: bool = False,
         nonlinearity_type: str = "norm",
-        nonlinearity_scalars: Dict[int, Callable] = {"e": "ssp", "o": "tanh"},
-        nonlinearity_gates: Dict[int, Callable] = {"e": "ssp", "o": "abs"},
     ):
+        """
+            irreps_layer_out_prev: o3.Irreps
+                convnet layerに入る前のirreps, node_featuresのirrepsを含む必要性がある.
+            feature_irreps_hidden: o3.Irreps
+                convet layer内でのnode_featuresの特徴量. 
+                同変性NNPでl={0,1,2}, p={-1,1}のとき32x0o+3201+32x1o+32x1e+32x2o+32x2e+32x3o+32x3eとなる
+                Nequipの論文内ではl={0,1}, p={1}のとき32x0e+32x1e
+                
+        """
         super().__init__()
 
         assert nonlinearity_type in ("gate", "norm")
-
-        nonlinearity_scalars = {
-            1: nonlinearity_scalars["e"],
-            -1: nonlinearity_scalars["o"],
-        }
-        nonlinearity_gates = {
-            1: nonlinearity_gates["e"],
-            -1: nonlinearity_gates["o"],
-        }
 
         self.feature_irreps_hidden = o3.Irreps(feature_irreps_hidden)
         self.resnet = resnet
@@ -72,9 +64,8 @@ class ConvNet(GraphModuleMixin, torch.nn.Module):
         for num_layer in range(num_layers):
             if num_layer > 0:
                 self.irreps_in = self.irreps_out
-
             edge_attr_irreps = self.irreps_in["edge_attrs"]
-            irreps_layer_out_prev = self.irreps_in["node_features"]
+            irreps_layer_out_prev = self.irreps_in["node_features"] 
             
             irreps_scalars = o3.Irreps(
                 [
@@ -93,38 +84,17 @@ class ConvNet(GraphModuleMixin, torch.nn.Module):
                     and tp_path_exists(irreps_layer_out_prev, edge_attr_irreps, ir)
                 ]
             )
-            
             irreps_layer_out = (irreps_scalars + irreps_gated).simplify()
-                 
-            if nonlinearity_type == "gate":
-                ir = (
-                    "0e"
-                    if tp_path_exists(irreps_layer_out_prev, edge_attr_irreps, "0e")
-                    else "0o"
-                )
-                irreps_gates = o3.Irreps([(mul, ir) for mul, _ in irreps_gated])
+            
+            conv_irreps_out = irreps_layer_out.simplify()
                 
-                equivariant_nonlin = Gate(
-                    irreps_scalars=irreps_scalars,
-                    act_scalars=[
-                        act_function[nonlinearity_scalars[ir.p]] for _, ir in irreps_scalars
-                    ],
-                    irreps_gates=irreps_gates,
-                    act_gates=[act_function[nonlinearity_gates[ir.p]] for _, ir in irreps_gates],
-                    irreps_gated=irreps_gated,
-                )
-                conv_irreps_out = equivariant_nonlin.irreps_in.simplify()
-                
-            else:
-                conv_irreps_out = irreps_layer_out.simplify()
-                
-                equivariant_nonlin = NormActivation(
-                    irreps_in=conv_irreps_out,
-                    scalar_nonlinearity=act_function[nonlinearity_scalars[1]],
-                    normalize=True,
-                    epsilon=1e-8,
-                    bias=True,
-                )
+            equivariant_nonlin = NormActivation(
+                irreps_in=conv_irreps_out,
+                scalar_nonlinearity=ShiftedSoftPlus,
+                normalize=True,
+                epsilon=1e-8,
+                bias=True,
+            )
             
             self.equivariant_nonlin = equivariant_nonlin
             self.equivariant_nonlins.append(self.equivariant_nonlin)
@@ -148,16 +118,20 @@ class ConvNet(GraphModuleMixin, torch.nn.Module):
             
     def forward(
         self,
-        data: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
+        node_features: torch.Tensor,
+        node_attrs: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_embedding: torch.Tensor,
+        edge_attrs: torch.Tensor,
+    ) -> torch.Tensor: # node_features, conv(node_attrs, edge_index, edge_embedding, edge_attrs)
         for layer_num, (conv, equivariant_nonlin) in enumerate(zip(self.convs, self.equivariant_nonlins)):
-            old_x = data["node_features"]
-            data = conv(data)
-            data["node_features"] = equivariant_nonlin(data["node_features"])
+            old_x = node_features # old_xを変更する
+            node_features = conv(edge_embedding, node_attrs, node_features, edge_index, edge_attrs)
+            node_features = equivariant_nonlin(node_features)
             
             if self.resnets[layer_num]:
-                data["node_features"] = (
-                    old_x + data["node_features"]
+                node_features = (
+                    old_x + node_features
                 )
                 
-        return data
+        return node_features

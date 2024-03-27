@@ -4,6 +4,7 @@ import torch
 from torch_runstats.scatter import scatter
 
 from e3nn import o3
+from e3nn.util.jit import compile_mode
 from e3nn.nn import FullyConnectedNet
 from e3nn.o3 import TensorProduct, FullyConnectedTensorProduct
 from _nequip.embedding._graph_mixin import GraphModuleMixin
@@ -12,6 +13,7 @@ from ._non_linear import ShiftedSoftPlus
 
 from ._linear import Linear
 
+@compile_mode('script')
 class InteractionBlock(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self, 
@@ -42,19 +44,19 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
             shared_weights=True,
         )
         
-        irreps_mid = []
+        irreps_after_tp = []
         instructions = []
         
         for i, (mul, ir_in) in enumerate(feature_irreps_in):
             for j, (_, ir_edge) in enumerate(irreps_edge_attr):
                 for ir_out in ir_in * ir_edge:
                     if ir_out in feature_irreps_out:
-                        k = len(irreps_mid)
-                        irreps_mid.append((mul, ir_out))
+                        k = len(irreps_after_tp)
+                        irreps_after_tp.append((mul, ir_out))
                         instructions.append((i, j, k, "uvu", True))
                         
-        irreps_mid = o3.Irreps(irreps_mid)
-        irreps_mid, p, _ = irreps_mid.sort()
+        irreps_after_tp = o3.Irreps(irreps_after_tp) # tensor productで出力後のirreps
+        irreps_after_tp, p, _ = irreps_after_tp.sort()
         
         instructions = [
             (i_in1, i_in2, p[i_out], mode, train)
@@ -64,13 +66,12 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
         tp = TensorProduct(
             feature_irreps_in,
             irreps_edge_attr,
-            irreps_mid,
+            irreps_after_tp,
             instructions,
             shared_weights=False,
             internal_weights=False,
         )
 
-        # init_irreps already confirmed that the edge embeddding is all invariant scalars
         self.fc = FullyConnectedNet(
             [self.irreps_in["edge_embedding"].num_irreps]
             + invariant_layers * [invariant_neurons]
@@ -84,11 +85,7 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
         self.tp = tp
 
         self.linear_2 = Linear(
-            # irreps_mid has uncoallesed irreps because of the uvu instructions,
-            # but there's no reason to treat them seperately for the Linear
-            # Note that normalization of o3.Linear changes if irreps are coallesed
-            # (likely for the better)
-            irreps_in=irreps_mid.simplify(),
+            irreps_in=irreps_after_tp.simplify(),
             irreps_out=feature_irreps_out,
             internal_weights=True,
             shared_weights=True,
@@ -100,38 +97,44 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
             feature_irreps_out,
         )
 
-    def forward(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(
+        self, 
+        edge_embedding: torch.Tensor,
+        node_attrs: torch.Tensor,
+        node_features: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attrs: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Evaluate interaction Block with ResNet (self-connection).
 
-        :param node_input:
-        :param node_attr: 各原子のone_hot
-        :param edge_src: edgeの中心原子
-        :param edge_dst: edgeを結ぶ隣接原子
-        :param edge_attr: edge_vectorを球面調和関数に入れて投影したもの
-        :param edge_embedded: rotation equivariantを達成するために、edge_lengthをbessel関数に入れてGNNにおける距離の情報を保つ
-        :return:
+        node_input:
+            node_attr: 各原子のone_hot
+            edge_neighbor: エッジの先のノード
+            edge_center: エッジの元のノード
+            edge_attr: edge_vectorを球面調和関数に入れて投影したもの
+            edge_embedded: rotation equivariantを達成するために、edge_lengthをbessel関数に入れてGNNにおける距離の情報を保つ
+        
+        return:
+            node_features: 各nodeに持つ特徴量
+            
         """
-        weight = self.fc(data["edge_embedding"])
+        weight = self.fc(edge_embedding)
 
-        x = data["node_features"]
-        edge_src = data["edge_index"][1]
-        edge_dst = data["edge_index"][0]
+        edge_neighbor = edge_index[1]
+        edge_center = edge_index[0]
 
-        if self.sc is not None:
-            sc = self.sc(x, data["node_attrs"])
+        sc = self.sc(node_features, node_attrs)
 
-        x = self.linear_1(x) # self-interaction1 ?
+        node_features = self.linear_1(node_features) # self-interaction1 
         
         edge_features = self.tp(
-            x[edge_src], data["edge_attrs"], weight
-        )
-        x = scatter(edge_features, edge_dst, dim=0, dim_size=len(x))
+            node_features[edge_neighbor], edge_attrs, weight
+        ) # convolution flter
+        node_features = scatter(edge_features, edge_center, dim=0, dim_size=len(node_features)) # node_featuresがSO(3)を保つ
 
-        x = self.linear_2(x) # self-interaction2 ?
+        node_features = self.linear_2(node_features) # self-interaction2 
 
-        if self.sc is not None:
-            x = x + sc # concatnation ?
+        node_features = node_features + sc 
         
-        data["node_features"] = x
-        return data
+        return node_features
