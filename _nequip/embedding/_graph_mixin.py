@@ -24,7 +24,7 @@ class GraphModuleMixin:
         """
         irreps_in = {} if irreps_in is None else irreps_in
         irreps_in = _fix_irreps_dict(irreps_in)
-        
+        # print(irreps_in)
         if "pos" in irreps_in:
             if irreps_in["pos"] != o3.Irreps("1x1o"):
                 raise ValueError(

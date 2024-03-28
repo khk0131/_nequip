@@ -63,3 +63,4 @@ class Gate(torch.nn.Module):
         if irreps_gates.num_irreps != irreps_gated.num_irreps:
             raise ValueError("The number of gates irreps are the same as the one of gated irreps")
         
+        self.sc = _Sortcut(irreps_scalars, irreps_gates, irreps_gated)
