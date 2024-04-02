@@ -6,6 +6,7 @@ import time
 
 from .dataset import NequipDataset
 from ..nn.nequip import Nequip
+from e3nn.util.jit import script
 
 class Trainer:
     def __init__(
@@ -168,7 +169,17 @@ class Trainer:
         assert 'activation_function' in config
         
         self.config = config
-        
+    
+    def save_model(self):
+        torch.save(
+            self.model.state_dict(),
+            self.config['state_dict_dir'] / f'nequip_{self.step_num}.pth'
+        )
+        script_model = script(self.model)
+        frozen_model = torch.jit.freeze(script_model.eval())
+        frozen_model.save(
+            self.config['save_frozen_model_dir'] / f'nequip_frozen_{self.step_num}.pth'
+            )
     
     def train(self):
         """Nequipモデルを訓練するクラス
@@ -183,24 +194,13 @@ class Trainer:
                             self.loss_pot_ratio *= self.config['loss_pot_ratio_gamma']
                         if self.step_num % self.config['loss_force_ratio_step_size'] == 0 and self.step_num != 0:
                             self.loss_force_ratio *= self.config['loss_force_ratio_gamma']
+                        if self.step_num % self.config['save_model_step_size'] == 0:
+                            self.save_model()
                         try:
-                            if self.step_num % self.config['save_model_step_size'] == 0:
-                                torch.save(
-                                    self.model.state_dict(),
-                                    self.config['state_dict_dir'] / f'nequip_{self.step_num}.pth'
-                                )
-                                script_model = torch.jit.script(self.model)
-                                frozen_model = torch.jit.optimize_for_inference(script_model.eval())
-                                frozen_model.save(
-                                    self.config['save_frozen_model_dir'] / f'nequip_frozen_{self.step_num}.pth'
-                                )
                             data = frames[frame_idx]
-                            backward_ok = True
-                            # data['pos'] += 0.5 # 0.0001
                             self.step_num += 1
                             self.optimizer.zero_grad()
                             assert abs(self.config['cut_off'] - data['cut_off'].item()) < 1e-6, 'datasetのcut_offとtrain用のconfigのcut_offが違います'
-                            # outputs['total_energy'], force = self.model(inputs)
                             outputs = self.model(
                                 data['pos'],
                                 data['atom_types'],
@@ -210,19 +210,10 @@ class Trainer:
                             )
                             loss_pot = abs(outputs['total_energy'] - data['potential_energy'])
                             loss_forces = torch.sum((outputs['atomic_force'] - data['force']).pow(2)).sqrt()
-                            if loss_forces > 1000:
-                                print(outputs["atomic_force"])
-                                print(data['force'])
-                                print(data['pos'])
-                                backward_ok = False
                             loss = (loss_pot / (data['pos'].numel() / 3.0)).pow(2) * self.loss_pot_ratio + (loss_forces.pow(2) / data['pos'].numel()) * self.loss_force_ratio
-                            if backward_ok:
-                                loss.backward()
-                                self.optimizer.step()
-                                self.scheduler.step()
-                            # loss.backward()
-                            # self.optimizer.step()
-                            # self.scheduler.step()
+                            loss.backward()
+                            self.optimizer.step()
+                            self.scheduler.step()
                             loss_forces_per_atom = loss_forces.item() / (data['pos'].numel()**(1/2))
                             data_path = pathlib.Path(data['path']).stem
                             end_time = time.time()
