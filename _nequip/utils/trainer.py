@@ -3,7 +3,8 @@ from typing import Dict, Any
 import pathlib 
 import os
 import time
-
+# import torch.multiprocessing
+# torch.multiprocessing.set_sharing_strategy('file_system')
 from .dataset import NequipDataset
 from ..nn.nequip import Nequip
 from e3nn.util.jit import script
@@ -55,10 +56,12 @@ class Trainer:
             self.train_dataset,
             shuffle=self.config['shuffle_dataset'],
             num_workers=self.config['dataloader_num_workers'],
-            batch_size=None,
+            batch_size=self.config['batch_size'],
+            # multiprocessing_context='spawn',
         )
         
         torch.autograd.set_detect_anomaly(True)
+        torch.backends.cudnn.benchmark = True
         
         self.step_num = 0
         if self.config['auto_resume']:
@@ -106,6 +109,9 @@ class Trainer:
         
         if 'dataloader_num_workers' not in config:
             config['dataloader_num_workers'] = 0
+        
+        if 'batch_size' not in config:
+            config['batch_size'] = None
         
         if 'epoch' not in config:
             config['epoch'] = 100

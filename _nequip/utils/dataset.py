@@ -16,10 +16,10 @@ class NequipDataset(torch.utils.data.Dataset):
         for datase_path in dataset_paths:
             dataset_frames_paths = list(datase_path.glob('**/*.pickle'))
             for dataset_frames_path in dataset_frames_paths:
-                self.dataset_frames_paths.append(dataset_frames_path)
+                # self.dataset_frames_paths.append(dataset_frames_path)
                 # print(dataset_frames_path, flush=True)
-                # if dataset_frames_path == Path("/nfshome18/khosono/work_vasp/vasp/dataset/train_dataset/test_limda_20240217/Fe_CH32NC_20240210/Fe_CH32NC_20240210_5.pickle"):
-                #     self.dataset_frames_paths.append(dataset_frames_path)
+                if dataset_frames_path == Path("/nfshome18/khosono/work_vasp/vasp/dataset/train_dataset/test_limda_20240217/Fe_CH32NC_20240210/Fe_CH32NC_20240210_5.pickle"):
+                    self.dataset_frames_paths.append(dataset_frames_path)
                 
     def __len__(self):
         return len(self.dataset_frames_paths)
