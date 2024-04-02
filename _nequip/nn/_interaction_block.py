@@ -4,16 +4,13 @@ import torch
 from torch_runstats.scatter import scatter
 
 from e3nn import o3
-from e3nn.util.jit import compile_mode
 from e3nn.nn import FullyConnectedNet
 from e3nn.o3 import TensorProduct, FullyConnectedTensorProduct
 from _nequip.embedding._graph_mixin import GraphModuleMixin
 
 from ._non_linear import ShiftedSoftPlus
-
 from ._linear import Linear
 
-# @compile_mode('trace')
 class InteractionBlock(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self, 

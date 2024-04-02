@@ -35,6 +35,9 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
                 p = 1では関数の反転はない, p=-1のとき反転を表す
             num_layers: int
                 convnet layerの数
+            num_features: int
+                feature_irreps_hiddenの各irrepがnum_features個になる.
+                allegroでいうenv_embed_multiplicity
             invariant_layers: int
                 interaction layer内のfully connected layerの数を構築
             invariant_neurons: int
@@ -67,7 +70,7 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
                 各処理前に持つirrepsを表す
             irreps_out: Dict[str, o3.Irreps]
                 各処理後に持つirrepsを表す
-            feature_irreps_hidden: Dict[str, o3.Irreps]
+            feature_irreps_hidden: 
                 ConvNet内でのnode featuresを表すirreps
     """
     
@@ -186,9 +189,11 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
         """ポテンシャルエネルギーと力を予測する
         Parameters
         ----------
-            data: dict{str: torch.Tensor}
-                入力値としてpos, edge_index, cut_off, cellの情報を持つ
-                ConvNetを通った後でのtotal_energy, atomic_forceなどの情報を格納していく
+            pos: 原子の位置情報
+            atom_types: 原子がどのtypeを持つか
+            edge_index: 辺ベクトルの中心と行き先の情報を持つ
+            cut_off: cutoffの大きさ
+            cell: cellの情報
         Returns
         -------
             total_energy: torch.Tensor, shape: []

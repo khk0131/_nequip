@@ -50,10 +50,7 @@ class OneHotAtomEncoding(GraphModuleMixin, torch.nn.Module):
         node_attrs = torch.nn.functional.one_hot(
             type_numbers, num_classes=self.num_types
         ).to(device=type_numbers.device, dtype=pos.dtype)
-        # data["node_attrs"] = one_hot
-        # if self.set_features:
-        #     data["node_features"] = one_hot
-        # node_features = node_attrs
+        
         return node_attrs
 
 
