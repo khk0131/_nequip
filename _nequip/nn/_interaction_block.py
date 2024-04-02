@@ -13,7 +13,7 @@ from ._non_linear import ShiftedSoftPlus
 
 from ._linear import Linear
 
-@compile_mode('script')
+# @compile_mode('trace')
 class InteractionBlock(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self, 
@@ -107,6 +107,7 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
     ) -> torch.Tensor:
         """
         Evaluate interaction Block with ResNet (self-connection).
+        ResNetスタイルを使ってnode featuresを更新
 
         node_input:
             node_attr: 各原子のone_hot
@@ -114,7 +115,6 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
             edge_center: エッジの元のノード
             edge_attr: edge_vectorを球面調和関数に入れて投影したもの
             edge_embedded: rotation equivariantを達成するために、edge_lengthをbessel関数に入れてGNNにおける距離の情報を保つ
-        
         return:
             node_features: 各nodeに持つ特徴量
             
@@ -124,7 +124,7 @@ class InteractionBlock(GraphModuleMixin, torch.nn.Module):
         edge_neighbor = edge_index[1]
         edge_center = edge_index[0]
 
-        sc = self.sc(node_features, node_attrs)
+        sc = self.sc(node_features, node_attrs) # self-interaction
 
         node_features = self.linear_1(node_features) # self-interaction1 
         
