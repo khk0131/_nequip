@@ -37,6 +37,9 @@ class Trainer:
                 resnet=config["resnet"],
             )
             self.model.to(self.device)
+            if self.device == 'cuda':
+                self.model = torch.nn.DataParallel(self.model)
+                torch.backends.cudnn.benchmark = True
             self.model.train()
             self.model.float()
             print(flush=True)
@@ -57,11 +60,15 @@ class Trainer:
             shuffle=self.config['shuffle_dataset'],
             num_workers=self.config['dataloader_num_workers'],
             batch_size=self.config['batch_size'],
+            collate_fn=lambda x: x ,
             # multiprocessing_context='spawn',
         )
-        
+        print(self.train_dataloader.batch_size)
+        print(len(self.train_dataset))
+        for data in self.train_dataloader:
+            print(len(data))
+        print(len(data[6]))
         torch.autograd.set_detect_anomaly(True)
-        torch.backends.cudnn.benchmark = True
         
         self.step_num = 0
         if self.config['auto_resume']:
@@ -204,9 +211,12 @@ class Trainer:
                             self.save_model()
                         try:
                             data = frames[frame_idx]
+                            print(data)
+                            print(data['cut_off'])
                             self.step_num += 1
                             self.optimizer.zero_grad()
                             assert abs(self.config['cut_off'] - data['cut_off'].item()) < 1e-6, 'datasetのcut_offとtrain用のconfigのcut_offが違います'
+                            # print(data, flush=True)
                             outputs = self.model(
                                 data['pos'],
                                 data['atom_types'],
