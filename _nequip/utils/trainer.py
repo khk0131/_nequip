@@ -55,19 +55,24 @@ class Trainer:
             dataset_paths=self.config['train_dataset_paths'],
             device=self.device,
         )
+        
+        def collate_fn(tuple_items):
+            input = []
+            output = []
+            for input_data, output_data in tuple_items:
+                input.append(input_data)
+                output.append(output_data)
+            return input, output
+                
         self.train_dataloader = torch.utils.data.DataLoader(
             self.train_dataset,
             shuffle=self.config['shuffle_dataset'],
             num_workers=self.config['dataloader_num_workers'],
             batch_size=self.config['batch_size'],
-            collate_fn=lambda x: x ,
+            collate_fn=collate_fn,
             # multiprocessing_context='spawn',
         )
-        print(self.train_dataloader.batch_size)
-        print(len(self.train_dataset))
-        for data in self.train_dataloader:
-            print(len(data))
-        print(len(data[6]))
+
         torch.autograd.set_detect_anomaly(True)
         
         self.step_num = 0
@@ -196,44 +201,90 @@ class Trainer:
     
     def train(self):
         """Nequipモデルを訓練するクラス
+           mini batch学習ができるようにした
         """
         print("epoch step_num    pred_pot_e    true_pot_e    loss_pot    loss_force      lr          loss_pot_ratio    time_step    data_path", flush=True)
         for epoch in range(self.config['epoch']):
-            for initial_frame_idx in range(self.config['frame_skip_num']):
-                for frames in self.train_dataloader:
-                    for frame_idx in range(initial_frame_idx, len(frames), self.config['frame_skip_num']):
-                        start_time = time.time()
-                        if self.step_num % self.config['loss_pot_ratio_step_size'] == 0 and self.step_num != 0:
-                            self.loss_pot_ratio *= self.config['loss_pot_ratio_gamma']
-                        if self.step_num % self.config['loss_force_ratio_step_size'] == 0 and self.step_num != 0:
-                            self.loss_force_ratio *= self.config['loss_force_ratio_gamma']
-                        if self.step_num % self.config['save_model_step_size'] == 0:
-                            self.save_model()
-                        try:
-                            data = frames[frame_idx]
-                            print(data)
-                            print(data['cut_off'])
-                            self.step_num += 1
-                            self.optimizer.zero_grad()
-                            assert abs(self.config['cut_off'] - data['cut_off'].item()) < 1e-6, 'datasetのcut_offとtrain用のconfigのcut_offが違います'
-                            # print(data, flush=True)
-                            outputs = self.model(
-                                data['pos'],
-                                data['atom_types'],
-                                data['edge_index'],
-                                data['cut_off'],
-                                data['cell'],
-                            )
-                            loss_pot = abs(outputs['total_energy'] - data['potential_energy'])
-                            loss_forces = torch.sum((outputs['atomic_force'] - data['force']).pow(2)).sqrt()
-                            loss = (loss_pot / (data['pos'].numel() / 3.0)).pow(2) * self.loss_pot_ratio + (loss_forces.pow(2) / data['pos'].numel()) * self.loss_force_ratio
-                            loss.backward()
-                            self.optimizer.step()
-                            self.scheduler.step()
-                            loss_forces_per_atom = loss_forces.item() / (data['pos'].numel()**(1/2))
-                            data_path = pathlib.Path(data['path']).stem
-                            end_time = time.time()
-                            print(f"{epoch:>3} {self.step_num:>10} {outputs['total_energy'].item():>12.4f} {data['potential_energy'].item():>12.4f} {loss_pot.item():>12.4f}    {loss_forces_per_atom:>12.5f} {self.scheduler.get_last_lr()[0]:>12.2e} {self.loss_pot_ratio:>12.2e}    {(end_time - start_time):>12.4f}      {data_path}", flush=True)
-                        except Exception as e:
-                            print(e)
-                            continue
+            start_time = time.time()
+            for input_data, output_data in self.train_dataloader:
+                loss = 0
+                for data_num in range(len(input_data)):
+                    if self.step_num % self.config['loss_pot_ratio_step_size'] == 0 and self.step_num != 0:
+                        self.loss_pot_ratio *= self.config['loss_pot_ratio_gamma']
+                    if self.step_num % self.config['loss_force_ratio_step_size'] == 0 and self.step_num != 0:
+                        self.loss_force_ratio *= self.config['loss_force_ratio_gamma']
+                    if self.step_num % self.config['save_model_step_size'] == 0:
+                        self.save_model()
+                    try:
+                        self.step_num += 1
+                        self.optimizer.zero_grad()
+                        assert abs(self.config['cut_off'] - input_data[data_num]['cut_off'].item()) < 1e-6, 'datasetのcut_offとtrain用のconfigのcut_offが違います'
+                        outputs = self.model(
+                            input_data[data_num]['pos'],
+                            input_data[data_num]['atom_types'],
+                            input_data[data_num]['edge_index'],
+                            input_data[data_num]['cut_off'],
+                            input_data[data_num]['cell'],
+                        )
+                        loss_pot = abs(outputs['total_energy'] - output_data[data_num]['potential_energy'])
+                        loss_forces = torch.sum((outputs['atomic_force'] - output_data[data_num]['force']).pow(2)).sqrt()
+                        loss += (loss_pot / (input_data[data_num]['pos'].numel() / 3.0)).pow(2) * self.loss_pot_ratio + (loss_forces.pow(2) / input_data[data_num]['pos'].numel()) * self.loss_force_ratio
+                        # loss.backward()
+                        # self.optimizer.step()
+                        # self.scheduler.step()
+                        loss_forces_per_atom = loss_forces.item() / (input_data[data_num]['pos'].numel()**(1/2))
+                        data_path = pathlib.Path(input_data[data_num]['path'])
+                        end_time = time.time()
+                        print(f"{epoch:>3} {self.step_num:>10} {outputs['total_energy'].item():>12.4f} {output_data[data_num]['potential_energy'].item():>12.4f} {loss_pot.item():>12.4f}    {loss_forces_per_atom:>12.5f} {self.scheduler.get_last_lr()[0]:>12.2e} {self.loss_pot_ratio:>12.2e}    {(end_time - start_time):>12.4f}      {data_path}", flush=True)
+                    except Exception as e:
+                        print(e)
+                        continue
+                loss.backward()
+                self.optimizer.step()
+                self.scheduler.step()
+                epoch_time = time.time()
+                print(epoch_time - start_time, flush=True)
+        # epoch_end_time = time.time()
+        # print(epoch_end_time - start_time, flush=True)
+                        
+        
+        
+        # for epoch in range(self.config['epoch']):
+        #     for initial_frame_idx in range(self.config['frame_skip_num']):
+        #         for frames in self.train_dataloader:
+        #             for frame_idx in range(initial_frame_idx, len(frames), self.config['frame_skip_num']):
+        #                 start_time = time.time()
+        #                 if self.step_num % self.config['loss_pot_ratio_step_size'] == 0 and self.step_num != 0:
+        #                     self.loss_pot_ratio *= self.config['loss_pot_ratio_gamma']
+        #                 if self.step_num % self.config['loss_force_ratio_step_size'] == 0 and self.step_num != 0:
+        #                     self.loss_force_ratio *= self.config['loss_force_ratio_gamma']
+        #                 if self.step_num % self.config['save_model_step_size'] == 0:
+        #                     self.save_model()
+        #                 try:
+        #                     data = frames[frame_idx]
+        #                     print(data)
+        #                     print(data['cut_off'])
+        #                     self.step_num += 1
+        #                     self.optimizer.zero_grad()
+        #                     assert abs(self.config['cut_off'] - data['cut_off'].item()) < 1e-6, 'datasetのcut_offとtrain用のconfigのcut_offが違います'
+        #                     # print(data, flush=True)
+        #                     outputs = self.model(
+        #                         data['pos'],
+        #                         data['atom_types'],
+        #                         data['edge_index'],
+        #                         data['cut_off'],
+        #                         data['cell'],
+        #                     )
+        #                     loss_pot = abs(outputs['total_energy'] - data['potential_energy'])
+        #                     loss_forces = torch.sum((outputs['atomic_force'] - data['force']).pow(2)).sqrt()
+        #                     loss = (loss_pot / (data['pos'].numel() / 3.0)).pow(2) * self.loss_pot_ratio + (loss_forces.pow(2) / data['pos'].numel()) * self.loss_force_ratio
+        #                     loss.backward()
+        #                     self.optimizer.step()
+        #                     self.scheduler.step()
+        #                     loss_forces_per_atom = loss_forces.item() / (data['pos'].numel()**(1/2))
+        #                     data_path = pathlib.Path(data['path']).stem
+        #                     end_time = time.time()
+        #                     print(f"{epoch:>3} {self.step_num:>10} {outputs['total_energy'].item():>12.4f} {data['potential_energy'].item():>12.4f} {loss_pot.item():>12.4f}    {loss_forces_per_atom:>12.5f} {self.scheduler.get_last_lr()[0]:>12.2e} {self.loss_pot_ratio:>12.2e}    {(end_time - start_time):>12.4f}      {data_path}", flush=True)
+        #                 except Exception as e:
+        #                     print(e)
+        #                     continue
