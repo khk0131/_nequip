@@ -61,7 +61,7 @@ class ConvNet(GraphModuleMixin, torch.nn.Module):
             required_irreps_in=["node_features"],
         )
         
-        for num_layer in range(num_layers):
+        for num_layer in range(self.num_layers):
             if num_layer > 0:
                 self.irreps_in = self.irreps_out
             edge_attr_irreps = self.irreps_in["edge_attrs"]

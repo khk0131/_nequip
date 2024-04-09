@@ -9,11 +9,13 @@ from ._atomwise import AtomwiseLinear
 from ._atomwise import AtomwiseReduce
 
 import torch
+from torch_runstats.scatter import scatter
 
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
-from typing import Dict
+from typing import Dict, List
+import numpy as np
 
 @compile_mode('script')
 class Nequip(torch.nn.Module, GraphModuleMixin):
@@ -166,9 +168,9 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
             activation_function=self.activation_function,
             resnet=self.resnet,
         )
-        
+        self.irreps_after_convnet = self.convnetlayer.irreps_out["node_features"]
         self.conv_to_output_hidden = AtomwiseLinear(
-            irreps_in=self.feature_irreps_hidden,
+            irreps_in=self.irreps_after_convnet,
             irreps_out=self.conv_to_output_hidden_irreps,
         )
         
@@ -180,11 +182,7 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
         self.total_energy = AtomwiseReduce()
     
     def forward(self,
-                pos: torch.Tensor,
-                atom_types: torch.Tensor,
-                edge_index: torch.Tensor,
-                cut_off: torch.Tensor,
-                cell: torch.Tensor,
+                input_data: List[Dict[str, torch.Tensor]],
     ):
         """ポテンシャルエネルギーと力を予測する
         Parameters
@@ -199,9 +197,35 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
             total_energy: torch.Tensor, shape: []
             atomic_force: torch.Tensor, shape: [num_atoms, 3]
         """
+        num_data = len(input_data)
+        assert num_data > 0
+        pos_list = []
+        edge_index_list = []
+        edge_cell_shift_list = []
+        atom_type_list = []
+        atom_max_num = 0
+        edge_index_mid_tensor = torch.tensor([])
+        for data_idx in range(len(input_data)):
+            num_atoms = input_data[data_idx]['pos'].shape[0]
+            edge_cell_shift = get_edge_cell_shift(input_data[data_idx]['pos'],
+                                                  input_data[data_idx]['edge_index'],
+                                                  input_data[data_idx]['cut_off'],
+                                                  input_data[data_idx]['cell'])
+            edge_index_mid_tensor  = input_data[data_idx]['edge_index'] + atom_max_num
+            pos_list.append(input_data[data_idx]['pos'])
+            edge_index_list.append(edge_index_mid_tensor)
+            edge_cell_shift_list.append(edge_cell_shift)
+            atom_type_list.append(input_data[data_idx]['atom_types'])
+            atom_max_num += num_atoms
+            
+        pos = torch.cat(pos_list, dim=0)
+        edge_index = torch.cat(edge_index_list, dim=1)
+        edge_cell_shift = torch.cat(edge_cell_shift_list, dim=0)
+        atom_types = torch.cat(atom_type_list, dim=0)
+        
         pos.requires_grad_(True)
         edge_index = torch.cat((edge_index, edge_index[[1, 0]]), dim=1)
-        edge_cell_shift = get_edge_cell_shift(pos, edge_index, cut_off, cell)
+        edge_cell_shift = torch.cat((edge_cell_shift, -edge_cell_shift), dim=0)
         edge_vectors = pos[edge_index[1]] - pos[edge_index[0]] + edge_cell_shift
 
         node_attrs = self.one_hot_encoding(pos, atom_types)
@@ -223,12 +247,19 @@ class Nequip(torch.nn.Module, GraphModuleMixin):
             retain_graph=self.training,
             create_graph=self.training,
         )[0] # 各原子に働く力を求めます
-
+        
+        data_slice_list = []
+        for data_idx in range(num_data):
+            x = torch.tensor(data_idx, device=pos.device)
+            x = x.repeat(1, input_data[data_idx]['pos'].shape[0]).reshape(-1)
+            data_slice_list.append(x)
+        data_slice = torch.cat(data_slice_list, dim=0).reshape(-1)
+        total_energy_per_data = scatter(atomic_energy, data_slice, dim=0).reshape(-1)
         outputs = {
-            "total_energy": total_energy,
+            "total_energy": total_energy_per_data,
             "atomic_force": atomic_force,
         }
-        
+
         return outputs
     
     def count_parameters(self):

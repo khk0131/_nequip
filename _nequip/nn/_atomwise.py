@@ -3,8 +3,9 @@ from typing import Optional
 import torch
 from torch_runstats.scatter import scatter
 from ..embedding._graph_mixin import GraphModuleMixin
-from ._linear import Linear
-# from e3nn.o3 import Linear
+# from ._linear import Linear
+from e3nn import o3
+from e3nn.o3 import Linear
 
 class AtomwiseLinear(GraphModuleMixin, torch.nn.Module):
     def __init__(

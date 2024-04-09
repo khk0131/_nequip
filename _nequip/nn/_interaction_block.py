@@ -9,7 +9,8 @@ from e3nn.o3 import TensorProduct, FullyConnectedTensorProduct
 from _nequip.embedding._graph_mixin import GraphModuleMixin
 
 from ._non_linear import ShiftedSoftPlus
-from ._linear import Linear
+# from ._linear import Linear
+from e3nn.o3 import Linear
 
 class InteractionBlock(GraphModuleMixin, torch.nn.Module):
     def __init__(

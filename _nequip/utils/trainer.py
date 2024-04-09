@@ -1,5 +1,5 @@
 import torch
-from typing import Dict, Any
+from typing import Dict, List, Any
 import pathlib 
 import os
 import time
@@ -72,8 +72,9 @@ class Trainer:
             collate_fn=collate_fn,
             # multiprocessing_context='spawn',
         )
-
+        
         torch.autograd.set_detect_anomaly(True)
+        # torch.backends.cudnn.benchmark = True
         
         self.step_num = 0
         if self.config['auto_resume']:
@@ -199,6 +200,28 @@ class Trainer:
             self.config['save_frozen_model_dir'] / f'nequip_frozen_{self.step_num}.pth'
             )
     
+    def frames_to_concated_tensor(self, input_data: List[Dict[str, torch.Tensor]]):
+        num_datas = len(input_data)
+        assert num_datas > 0
+        true_total_energy_list = []
+        true_force_list = []
+        for data_idx in range(len(input_data)):
+            true_total_energy_list.append(input_data[data_idx]['potential_energy'].reshape(1))
+            true_force_list.append(input_data[data_idx]['force'])
+        true_total_energy = torch.cat(true_total_energy_list, dim=0)
+        true_force = torch.cat(true_force_list, dim=0)
+
+        
+        return true_total_energy, true_force
+    
+    def average_atom_num_per_data(self, input_data: List[Dict[str, torch.Tensor]]):
+        total_atom_num = 0
+        for data_idx in range(len(input_data)):
+            total_atom_num += input_data[data_idx]['pos'].numel()
+        avg_atom_num  = total_atom_num / len(input_data)
+        
+        return avg_atom_num
+    
     def train(self):
         """Nequipモデルを訓練するクラス
            mini batch学習ができるようにした
@@ -207,43 +230,40 @@ class Trainer:
         for epoch in range(self.config['epoch']):
             start_time = time.time()
             for input_data, output_data in self.train_dataloader:
-                loss = 0
-                for data_num in range(len(input_data)):
-                    if self.step_num % self.config['loss_pot_ratio_step_size'] == 0 and self.step_num != 0:
-                        self.loss_pot_ratio *= self.config['loss_pot_ratio_gamma']
-                    if self.step_num % self.config['loss_force_ratio_step_size'] == 0 and self.step_num != 0:
-                        self.loss_force_ratio *= self.config['loss_force_ratio_gamma']
-                    if self.step_num % self.config['save_model_step_size'] == 0:
-                        self.save_model()
-                    try:
-                        self.step_num += 1
-                        self.optimizer.zero_grad()
-                        assert abs(self.config['cut_off'] - input_data[data_num]['cut_off'].item()) < 1e-6, 'datasetのcut_offとtrain用のconfigのcut_offが違います'
-                        outputs = self.model(
-                            input_data[data_num]['pos'],
-                            input_data[data_num]['atom_types'],
-                            input_data[data_num]['edge_index'],
-                            input_data[data_num]['cut_off'],
-                            input_data[data_num]['cell'],
-                        )
-                        loss_pot = abs(outputs['total_energy'] - output_data[data_num]['potential_energy'])
-                        loss_forces = torch.sum((outputs['atomic_force'] - output_data[data_num]['force']).pow(2)).sqrt()
-                        loss += (loss_pot / (input_data[data_num]['pos'].numel() / 3.0)).pow(2) * self.loss_pot_ratio + (loss_forces.pow(2) / input_data[data_num]['pos'].numel()) * self.loss_force_ratio
-                        # loss.backward()
-                        # self.optimizer.step()
-                        # self.scheduler.step()
-                        loss_forces_per_atom = loss_forces.item() / (input_data[data_num]['pos'].numel()**(1/2))
-                        data_path = pathlib.Path(input_data[data_num]['path'])
-                        end_time = time.time()
-                        print(f"{epoch:>3} {self.step_num:>10} {outputs['total_energy'].item():>12.4f} {output_data[data_num]['potential_energy'].item():>12.4f} {loss_pot.item():>12.4f}    {loss_forces_per_atom:>12.5f} {self.scheduler.get_last_lr()[0]:>12.2e} {self.loss_pot_ratio:>12.2e}    {(end_time - start_time):>12.4f}      {data_path}", flush=True)
-                    except Exception as e:
-                        print(e)
-                        continue
-                loss.backward()
-                self.optimizer.step()
-                self.scheduler.step()
-                epoch_time = time.time()
-                print(epoch_time - start_time, flush=True)
+                if self.step_num % self.config['loss_pot_ratio_step_size'] == 0 and self.step_num != 0:
+                    self.loss_pot_ratio *= self.config['loss_pot_ratio_gamma']
+                if self.step_num % self.config['loss_force_ratio_step_size'] == 0 and self.step_num != 0:
+                    self.loss_force_ratio *= self.config['loss_force_ratio_gamma']
+                if self.step_num % self.config['save_model_step_size'] == 0:
+                    self.save_model()
+                try:
+                    self.step_num += 1
+                    self.optimizer.zero_grad()
+                    assert abs(self.config['cut_off'] - input_data[0]['cut_off'].item()) < 1e-6, 'datasetのcut_offとtrain用のconfigのcut_offが違います'
+                    outputs = self.model(
+                        input_data,
+                    )            
+                    # print(outputs)        
+                    true_total_energy, true_force = self.frames_to_concated_tensor(output_data)
+                    loss_pot = torch.sum(abs(outputs['total_energy'] - true_total_energy))
+                    loss_pot_per_data = loss_pot / len(input_data)
+                    loss_forces = torch.sum(torch.pow((outputs['atomic_force'] - true_force), 2)).sqrt()
+                    loss_force_per_data = (loss_forces / len(input_data))
+                    avg_data_num = self.average_atom_num_per_data(input_data)
+                    loss = (loss_pot_per_data / (avg_data_num / 3.0))**(2) * self.loss_pot_ratio + (loss_force_per_data**(2) / avg_data_num) * self.loss_force_ratio
+                    loss.backward()
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    loss_forces_per_atom = loss_force_per_data.item() / (avg_data_num**(1/2))
+                    end_time = time.time()
+                    print(f"{epoch:>3} {self.step_num:>10} {torch.sum(outputs['total_energy']).item():>12.4f} {torch.sum(true_total_energy).item():>12.4f} {loss_pot_per_data.item():>12.4f}    {loss_forces_per_atom:>12.5f} {self.scheduler.get_last_lr()[0]:>12.2e} {self.loss_pot_ratio:>12.2e}    {(end_time - start_time):>12.4f}", flush=True)
+                except Exception as e:
+                    print(e)
+                    continue
+
+                # self.scheduler.step()
+                # epoch_time = time.time()
+                # print(epoch_time - start_time, flush=True)
         # epoch_end_time = time.time()
         # print(epoch_end_time - start_time, flush=True)
                         

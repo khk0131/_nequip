@@ -24,7 +24,6 @@ class NequipDataset(torch.utils.data.Dataset):
                 with open(dataset_frames_path, 'rb') as f:
                     frames = pickle.load(f)
                     for frame_idx in range(len(frames)):
-                        concat_data = []
                         input_data: Dict[str, Union[str, torch.tensor]] = {}
                         output_data: Dict[str, Union[str, torch.tensor]] = {}
                         input_data['pos'] = torch.tensor(frames[frame_idx]['pos'], device=self.device, dtype=torch.float32)
