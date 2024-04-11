@@ -124,7 +124,7 @@ class Trainer:
             config['dataloader_num_workers'] = 0
         
         if 'batch_size' not in config:
-            config['batch_size'] = None
+            config['batch_size'] = 1
         
         if 'epoch' not in config:
             config['epoch'] = 100
