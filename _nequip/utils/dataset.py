@@ -13,7 +13,6 @@ class NequipDataset(torch.utils.data.Dataset):
         super().__init__()
         self.device = device
         self.dataset_frames_paths = []
-        self.num_data =  0
         self.inputs = []
         self.outputs = []
         # self.data: List[List[Dict[str, Union[str, torch.tensor]], Dict[str, torch.tensor]]] = []
